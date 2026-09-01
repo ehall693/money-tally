@@ -1,0 +1,8 @@
+[package]
+name = "money-tally"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "money-tally"
+path = "src/main.rs"

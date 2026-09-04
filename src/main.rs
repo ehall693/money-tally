@@ -77,7 +77,8 @@ fn scan<R: BufRead>(
 }
 
 // Returns (symbol, amount-in-minor-units) for every recognizable amount in a
-// line, e.g. "$1,234.56" -> ('$', 123456), "-$5" -> ('$', -500).
+// line, e.g. "$1,234.56" -> ('$', 123456), "-$5" -> ('$', -500),
+// "($5.00)" -> ('$', -500).
 fn find_amounts(line: &str) -> Vec<(char, i64)> {
     let chars: Vec<char> = line.chars().collect();
     let mut found = Vec::new();
@@ -85,10 +86,20 @@ fn find_amounts(line: &str) -> Vec<(char, i64)> {
     while i < chars.len() {
         let c = chars[i];
         if SYMBOLS.contains(&c) {
-            let negative = i > 0 && chars[i - 1] == '-';
+            let dash_negative = i > 0 && chars[i - 1] == '-';
+            let paren_open = i > 0 && chars[i - 1] == '(';
             if let Some((cents, next_i)) = parse_amount(&chars, i + 1) {
+                let mut end = next_i;
+                let mut negative = dash_negative;
+                // Only treat this as a parenthesized negative if the paren
+                // actually closes right after the amount -- "(" alone isn't
+                // evidence of anything.
+                if paren_open && end < chars.len() && chars[end] == ')' {
+                    negative = true;
+                    end += 1;
+                }
                 found.push((c, if negative { -cents } else { cents }));
-                i = next_i;
+                i = end;
                 continue;
             }
         }

@@ -38,9 +38,12 @@ the longest single line in the input, not by the file's total size, so a
 Amounts are matched per line: a currency symbol (`$`, `£`, `€`, `¥`)
 followed directly by digits, with optional comma thousands separators and
 an optional two-digit decimal fraction. A `-` immediately before the
-symbol makes the amount negative. Amounts are tracked separately per
-symbol -- `$` and `€` totals are never mixed together, and no attempt is
-made to guess that a `$` means USD versus CAD versus AUD.
+symbol makes the amount negative, and so does wrapping the whole thing in
+parentheses, e.g. `($12.34)`, the accounting convention for a negative
+number -- the closing paren has to sit right after the amount for this to
+count, otherwise the `(` is just a stray character. Amounts are tracked
+separately per symbol -- `$` and `€` totals are never mixed together, and
+no attempt is made to guess that a `$` means USD versus CAD versus AUD.
 
 ## Usage
 
@@ -53,7 +56,6 @@ scans each in turn and prints combined totals.
 
 ## Current limitations
 
-- No support for parenthesized negatives, e.g. `($12.34)`.
 - No support for suffix notation, e.g. `12.50 USD`.
 - Symbols are not mapped to ISO currency codes, so all `$` amounts are
   summed together regardless of which dollar they actually are.

@@ -35,15 +35,20 @@ that gets cleared and reused for the next line. Memory use is bounded by
 the longest single line in the input, not by the file's total size, so a
 50GB log file and a 50 line file cost the same to scan.
 
-Amounts are matched per line: a currency symbol (`$`, `£`, `€`, `¥`)
-followed directly by digits, with optional comma thousands separators and
-an optional two-digit decimal fraction. A `-` immediately before the
-symbol makes the amount negative, and so does wrapping the whole thing in
-parentheses, e.g. `($12.34)`, the accounting convention for a negative
+Amounts are matched per line in two forms. The first is a currency symbol
+(`$`, `£`, `€`, `¥`) followed directly by digits, with optional comma
+thousands separators and an optional two-digit decimal fraction. The
+second is a bare number followed by a three-letter uppercase currency
+code, e.g. `12.50 USD` -- the code just has to sit at a word boundary, so
+`USDT` or `USD1` don't get misread as `USD`. A `-` immediately before the
+amount (the symbol, or the leading digit for a suffix code) makes it
+negative, and so does wrapping the whole thing in parentheses, e.g.
+`($12.34)` or `(12.34 USD)`, the accounting convention for a negative
 number -- the closing paren has to sit right after the amount for this to
 count, otherwise the `(` is just a stray character. Amounts are tracked
-separately per symbol -- `$` and `€` totals are never mixed together, and
-no attempt is made to guess that a `$` means USD versus CAD versus AUD.
+separately per symbol or code -- `$` and `€` totals are never mixed
+together, and no attempt is made to guess that a `$` means USD versus CAD
+versus AUD, or that `$` and `USD` are the same currency.
 
 ## Usage
 
@@ -56,9 +61,10 @@ scans each in turn and prints combined totals.
 
 ## Current limitations
 
-- No support for suffix notation, e.g. `12.50 USD`.
 - Symbols are not mapped to ISO currency codes, so all `$` amounts are
-  summed together regardless of which dollar they actually are.
+  summed together regardless of which dollar they actually are, and a
+  `$` total is never combined with a `USD` total even though they likely
+  mean the same currency.
 
 ## License
 

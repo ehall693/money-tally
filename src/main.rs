@@ -3,6 +3,9 @@ use std::env;
 use std::fs::File;
 use std::io::{self, BufRead, BufReader};
 
+// e.g. "$=USD" or "$=USD,£=GBP" via one or more --map flags.
+type SymbolMap = BTreeMap<char, String>;
+
 // Symbols we recognize as the start of an amount. Kept as a small fixed set
 // rather than anything configurable for now -- see README for what's missing.
 const SYMBOLS: [char; 4] = ['$', '\u{a3}', '\u{20ac}', '\u{a5}'];
@@ -17,7 +20,13 @@ enum Currency {
 }
 
 fn main() {
-    let paths: Vec<String> = env::args().skip(1).collect();
+    let (symbol_map, paths) = match parse_args(env::args().skip(1)) {
+        Ok(parsed) => parsed,
+        Err(msg) => {
+            eprintln!("money-tally: {msg}");
+            std::process::exit(1);
+        }
+    };
 
     let mut totals: BTreeMap<Currency, i64> = BTreeMap::new();
     let mut counts: BTreeMap<Currency, u64> = BTreeMap::new();
@@ -25,14 +34,14 @@ fn main() {
     let result = if paths.is_empty() {
         let stdin = io::stdin();
         let mut handle = stdin.lock();
-        scan(&mut handle, &mut totals, &mut counts)
+        scan(&mut handle, &symbol_map, &mut totals, &mut counts)
     } else {
         let mut result = Ok(());
         for path in &paths {
             match File::open(path) {
                 Ok(file) => {
                     let mut reader = BufReader::new(file);
-                    if let Err(e) = scan(&mut reader, &mut totals, &mut counts) {
+                    if let Err(e) = scan(&mut reader, &symbol_map, &mut totals, &mut counts) {
                         result = Err(format!("reading {path}: {e}"));
                         break;
                     }
@@ -67,10 +76,58 @@ fn main() {
     }
 }
 
+// Splits `--map SPEC` (and its file-path arguments) out of the raw args.
+// SPEC is one or more "symbol=CODE" pairs separated by commas, e.g.
+// "$=USD,£=GBP"; the flag can also be repeated to build up one map.
+fn parse_args<I: Iterator<Item = String>>(args: I) -> Result<(SymbolMap, Vec<String>), String> {
+    let mut map = SymbolMap::new();
+    let mut paths = Vec::new();
+    let mut args = args;
+
+    while let Some(arg) = args.next() {
+        if let Some(spec) = arg.strip_prefix("--map=") {
+            parse_map_spec(spec, &mut map)?;
+        } else if arg == "--map" {
+            let spec = args
+                .next()
+                .ok_or_else(|| "--map requires an argument, e.g. --map $=USD".to_string())?;
+            parse_map_spec(&spec, &mut map)?;
+        } else {
+            paths.push(arg);
+        }
+    }
+
+    Ok((map, paths))
+}
+
+fn parse_map_spec(spec: &str, map: &mut SymbolMap) -> Result<(), String> {
+    for pair in spec.split(',') {
+        let (symbol, code) = pair
+            .split_once('=')
+            .ok_or_else(|| format!("invalid --map entry \"{pair}\", expected SYMBOL=CODE"))?;
+
+        let mut symbol_chars = symbol.chars();
+        let symbol_char = symbol_chars
+            .next()
+            .filter(|_| symbol_chars.next().is_none())
+            .ok_or_else(|| format!("invalid --map symbol \"{symbol}\", expected a single character"))?;
+
+        if code.len() != 3 || !code.chars().all(|c| c.is_ascii_uppercase()) {
+            return Err(format!(
+                "invalid --map code \"{code}\", expected three uppercase letters"
+            ));
+        }
+
+        map.insert(symbol_char, code.to_string());
+    }
+    Ok(())
+}
+
 // Reads one line at a time into a reused buffer so total memory use stays
 // bounded by the longest single line, not by the size of the input.
 fn scan<R: BufRead>(
     reader: &mut R,
+    symbol_map: &SymbolMap,
     totals: &mut BTreeMap<Currency, i64>,
     counts: &mut BTreeMap<Currency, u64>,
 ) -> Result<(), String> {
@@ -81,7 +138,7 @@ fn scan<R: BufRead>(
         if bytes_read == 0 {
             break;
         }
-        for (currency, cents) in find_amounts(&line) {
+        for (currency, cents) in find_amounts(&line, symbol_map) {
             *totals.entry(currency.clone()).or_insert(0) += cents;
             *counts.entry(currency).or_insert(0) += 1;
         }
@@ -92,8 +149,9 @@ fn scan<R: BufRead>(
 // Returns (currency, amount-in-minor-units) for every recognizable amount in
 // a line, e.g. "$1,234.56" -> (Symbol('$'), 123456), "-$5" -> (Symbol('$'),
 // -500), "($5.00)" -> (Symbol('$'), -500), "12.50 USD" -> (Code("USD"),
-// 1250).
-fn find_amounts(line: &str) -> Vec<(Currency, i64)> {
+// 1250). Symbols present in `symbol_map` are reported as their mapped
+// `Code` instead, so e.g. "$5" and "5 USD" land in the same total.
+fn find_amounts(line: &str, symbol_map: &SymbolMap) -> Vec<(Currency, i64)> {
     let chars: Vec<char> = line.chars().collect();
     let mut found = Vec::new();
     let mut i = 0;
@@ -112,7 +170,11 @@ fn find_amounts(line: &str) -> Vec<(Currency, i64)> {
                     negative = true;
                     end += 1;
                 }
-                found.push((Currency::Symbol(c), if negative { -cents } else { cents }));
+                let currency = match symbol_map.get(&c) {
+                    Some(code) => Currency::Code(code.clone()),
+                    None => Currency::Symbol(c),
+                };
+                found.push((currency, if negative { -cents } else { cents }));
                 i = end;
                 continue;
             }

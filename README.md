@@ -53,18 +53,35 @@ versus AUD, or that `$` and `USD` are the same currency.
 ## Usage
 
 ```
-money-tally [file ...]
+money-tally [--map SYMBOL=CODE[,SYMBOL=CODE...]] [file ...]
 ```
 
 With no arguments it reads from stdin. With one or more file arguments it
 scans each in turn and prints combined totals.
 
+By default `$`, `£`, `€`, and `¥` are totaled separately from any ISO
+code that happens to mean the same currency -- a `$` total is never
+combined with a `USD` total, because `$` alone doesn't say which dollar
+it is. `--map` lets you say so explicitly:
+
+```
+$ money-tally --map '$=USD' receipts.txt
+$29.49 USD total across 4 amounts
+```
+
+Once mapped, a symbol's amounts are folded into that code's total, so
+`$5` and `5 USD` in the same input add up together. The flag can be
+repeated, or given a comma-separated list, to map more than one symbol:
+
+```
+money-tally --map '$=USD,£=GBP' receipts.txt
+```
+
 ## Current limitations
 
-- Symbols are not mapped to ISO currency codes, so all `$` amounts are
-  summed together regardless of which dollar they actually are, and a
-  `$` total is never combined with a `USD` total even though they likely
-  mean the same currency.
+- Every dollar sign still has to be mapped to the same code -- there's
+  no way to tell a `$` meaning USD from a `$` meaning CAD within the
+  same run.
 
 ## License
 

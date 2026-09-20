@@ -53,11 +53,29 @@ versus AUD, or that `$` and `USD` are the same currency.
 ## Usage
 
 ```
-money-tally [--map SYMBOL=CODE[,SYMBOL=CODE...]] [file ...]
+money-tally [--map SYMBOL=CODE[,SYMBOL=CODE...]] [--per-file] [file ...]
 ```
 
 With no arguments it reads from stdin. With one or more file arguments it
 scans each in turn and prints combined totals.
+
+`--per-file` prints each file's own totals first, labeled with its path,
+followed by an `overall:` summary when more than one file was given:
+
+```
+$ money-tally --per-file january.txt february.txt
+january.txt:
+$1,204.50 total across 9 amounts
+
+february.txt:
+$988.20 total across 7 amounts
+
+overall:
+$2,192.70 total across 16 amounts
+```
+
+It requires at least one file argument -- there's no per-file breakdown
+of a single stdin stream.
 
 By default `$`, `£`, `€`, and `¥` are totaled separately from any ISO
 code that happens to mean the same currency -- a `$` total is never

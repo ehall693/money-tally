@@ -20,7 +20,7 @@ enum Currency {
 }
 
 fn main() {
-    let (symbol_map, paths) = match parse_args(env::args().skip(1)) {
+    let (symbol_map, per_file, paths) = match parse_args(env::args().skip(1)) {
         Ok(parsed) => parsed,
         Err(msg) => {
             eprintln!("money-tally: {msg}");
@@ -28,20 +28,49 @@ fn main() {
         }
     };
 
-    let mut totals: BTreeMap<Currency, i64> = BTreeMap::new();
-    let mut counts: BTreeMap<Currency, u64> = BTreeMap::new();
+    if per_file && paths.is_empty() {
+        eprintln!("money-tally: --per-file requires at least one file argument");
+        std::process::exit(1);
+    }
+
+    let mut overall_totals: BTreeMap<Currency, i64> = BTreeMap::new();
+    let mut overall_counts: BTreeMap<Currency, u64> = BTreeMap::new();
 
     let result = if paths.is_empty() {
         let stdin = io::stdin();
         let mut handle = stdin.lock();
-        scan(&mut handle, &symbol_map, &mut totals, &mut counts)
+        scan(&mut handle, &symbol_map, &mut overall_totals, &mut overall_counts)
+    } else if per_file {
+        let mut result = Ok(());
+        for path in &paths {
+            let mut file_totals: BTreeMap<Currency, i64> = BTreeMap::new();
+            let mut file_counts: BTreeMap<Currency, u64> = BTreeMap::new();
+            match File::open(path) {
+                Ok(file) => {
+                    let mut reader = BufReader::new(file);
+                    if let Err(e) = scan(&mut reader, &symbol_map, &mut file_totals, &mut file_counts) {
+                        result = Err(format!("reading {path}: {e}"));
+                        break;
+                    }
+                }
+                Err(e) => {
+                    result = Err(format!("opening {path}: {e}"));
+                    break;
+                }
+            }
+            println!("{path}:");
+            print_totals(&file_totals, &file_counts);
+            println!();
+            merge_into(&mut overall_totals, &mut overall_counts, &file_totals, &file_counts);
+        }
+        result
     } else {
         let mut result = Ok(());
         for path in &paths {
             match File::open(path) {
                 Ok(file) => {
                     let mut reader = BufReader::new(file);
-                    if let Err(e) = scan(&mut reader, &symbol_map, &mut totals, &mut counts) {
+                    if let Err(e) = scan(&mut reader, &symbol_map, &mut overall_totals, &mut overall_counts) {
                         result = Err(format!("reading {path}: {e}"));
                         break;
                     }
@@ -60,12 +89,21 @@ fn main() {
         std::process::exit(1);
     }
 
+    if per_file && paths.len() > 1 {
+        println!("overall:");
+    }
+    if !per_file || paths.len() > 1 {
+        print_totals(&overall_totals, &overall_counts);
+    }
+}
+
+fn print_totals(totals: &BTreeMap<Currency, i64>, counts: &BTreeMap<Currency, u64>) {
     if totals.is_empty() {
         println!("no currency amounts found");
         return;
     }
 
-    for (currency, cents) in &totals {
+    for (currency, cents) in totals {
         let n = counts[currency];
         let plural = if n == 1 { "" } else { "s" };
         let amount = format_cents(*cents);
@@ -76,11 +114,32 @@ fn main() {
     }
 }
 
-// Splits `--map SPEC` (and its file-path arguments) out of the raw args.
-// SPEC is one or more "symbol=CODE" pairs separated by commas, e.g.
-// "$=USD,£=GBP"; the flag can also be repeated to build up one map.
-fn parse_args<I: Iterator<Item = String>>(args: I) -> Result<(SymbolMap, Vec<String>), String> {
+// Folds one file's totals/counts into the running combined totals, used to
+// build the "overall" summary after a --per-file breakdown without
+// re-reading every file a second time.
+fn merge_into(
+    totals: &mut BTreeMap<Currency, i64>,
+    counts: &mut BTreeMap<Currency, u64>,
+    file_totals: &BTreeMap<Currency, i64>,
+    file_counts: &BTreeMap<Currency, u64>,
+) {
+    for (currency, cents) in file_totals {
+        *totals.entry(currency.clone()).or_insert(0) += cents;
+    }
+    for (currency, n) in file_counts {
+        *counts.entry(currency.clone()).or_insert(0) += n;
+    }
+}
+
+// Splits `--map SPEC` and `--per-file` (and the file-path arguments) out of
+// the raw args. SPEC is one or more "symbol=CODE" pairs separated by
+// commas, e.g. "$=USD,£=GBP"; the flag can also be repeated to build up
+// one map.
+fn parse_args<I: Iterator<Item = String>>(
+    args: I,
+) -> Result<(SymbolMap, bool, Vec<String>), String> {
     let mut map = SymbolMap::new();
+    let mut per_file = false;
     let mut paths = Vec::new();
     let mut args = args;
 
@@ -92,12 +151,14 @@ fn parse_args<I: Iterator<Item = String>>(args: I) -> Result<(SymbolMap, Vec<Str
                 .next()
                 .ok_or_else(|| "--map requires an argument, e.g. --map $=USD".to_string())?;
             parse_map_spec(&spec, &mut map)?;
+        } else if arg == "--per-file" {
+            per_file = true;
         } else {
             paths.push(arg);
         }
     }
 
-    Ok((map, paths))
+    Ok((map, per_file, paths))
 }
 
 fn parse_map_spec(spec: &str, map: &mut SymbolMap) -> Result<(), String> {

@@ -356,3 +356,262 @@ fn format_cents(cents: i64) -> String {
 
     format!("{}{}.{:02}", if negative { "-" } else { "" }, grouped, frac)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn parse(chars_str: &str, start: usize) -> Option<(i64, usize)> {
+        let chars: Vec<char> = chars_str.chars().collect();
+        parse_amount(&chars, start)
+    }
+
+    #[test]
+    fn parse_amount_plain_whole_number() {
+        assert_eq!(parse("500", 0), Some((50000, 3)));
+    }
+
+    #[test]
+    fn parse_amount_with_decimal() {
+        assert_eq!(parse("12.34", 0), Some((1234, 5)));
+    }
+
+    #[test]
+    fn parse_amount_single_fraction_digit_is_scaled_to_tenths() {
+        assert_eq!(parse("1.5", 0), Some((150, 3)));
+    }
+
+    #[test]
+    fn parse_amount_extra_fraction_digits_are_consumed_but_ignored() {
+        // Only the first two fractional digits count toward cents, but a
+        // third one still has to be swallowed so it isn't mistaken for the
+        // start of a new number.
+        assert_eq!(parse("1.239", 0), Some((123, 5)));
+    }
+
+    #[test]
+    fn parse_amount_trailing_dot_with_no_digits_is_not_consumed() {
+        assert_eq!(parse("5.", 0), Some((500, 1)));
+    }
+
+    #[test]
+    fn parse_amount_thousands_separators() {
+        assert_eq!(parse("1,234,567.89", 0), Some((123456789, 12)));
+    }
+
+    #[test]
+    fn parse_amount_comma_before_any_digit_is_rejected() {
+        assert_eq!(parse(",500", 0), None);
+    }
+
+    #[test]
+    fn parse_amount_no_digits_is_none() {
+        assert_eq!(parse("abc", 0), None);
+    }
+
+    fn amounts(line: &str) -> Vec<(Currency, i64)> {
+        find_amounts(line, &SymbolMap::new())
+    }
+
+    #[test]
+    fn find_amounts_empty_line() {
+        assert_eq!(amounts(""), vec![]);
+    }
+
+    #[test]
+    fn find_amounts_plain_text_with_no_numbers() {
+        assert_eq!(amounts("no money here"), vec![]);
+    }
+
+    #[test]
+    fn find_amounts_simple_symbol() {
+        assert_eq!(amounts("$5"), vec![(Currency::Symbol('$'), 500)]);
+    }
+
+    #[test]
+    fn find_amounts_symbol_with_no_following_digits_is_ignored() {
+        assert_eq!(amounts("$ five dollars"), vec![]);
+    }
+
+    #[test]
+    fn find_amounts_bare_symbol_at_end_of_line() {
+        assert_eq!(amounts("cost: $"), vec![]);
+    }
+
+    #[test]
+    fn find_amounts_dash_negative_symbol() {
+        assert_eq!(amounts("-$3.00"), vec![(Currency::Symbol('$'), -300)]);
+    }
+
+    #[test]
+    fn find_amounts_parenthesized_negative_symbol() {
+        assert_eq!(amounts("($5.00)"), vec![(Currency::Symbol('$'), -500)]);
+    }
+
+    #[test]
+    fn find_amounts_unclosed_paren_is_not_negative() {
+        assert_eq!(amounts("($5.00 refund pending"), vec![(Currency::Symbol('$'), 500)]);
+    }
+
+    #[test]
+    fn find_amounts_suffix_code() {
+        assert_eq!(amounts("12.50 USD"), vec![(Currency::Code("USD".to_string()), 1250)]);
+    }
+
+    #[test]
+    fn find_amounts_suffix_code_with_no_space() {
+        assert_eq!(amounts("12.50USD"), vec![(Currency::Code("USD".to_string()), 1250)]);
+    }
+
+    #[test]
+    fn find_amounts_negative_suffix_code() {
+        assert_eq!(amounts("-12.50 USD"), vec![(Currency::Code("USD".to_string()), -1250)]);
+    }
+
+    #[test]
+    fn find_amounts_parenthesized_negative_suffix_code() {
+        assert_eq!(amounts("(12.50 USD)"), vec![(Currency::Code("USD".to_string()), -1250)]);
+    }
+
+    #[test]
+    fn find_amounts_number_glued_to_extra_letters_is_not_a_code() {
+        assert_eq!(amounts("12.50 USDT"), vec![]);
+    }
+
+    #[test]
+    fn find_amounts_code_glued_to_extra_digit_is_not_a_code() {
+        assert_eq!(amounts("12.50 USD1"), vec![]);
+    }
+
+    #[test]
+    fn find_amounts_number_preceded_by_letters_is_not_a_word_boundary() {
+        assert_eq!(amounts("AB123 USD"), vec![]);
+    }
+
+    #[test]
+    fn find_amounts_lowercase_suffix_is_not_a_code() {
+        assert_eq!(amounts("12.50 usd"), vec![]);
+    }
+
+    #[test]
+    fn find_amounts_multiple_amounts_one_line() {
+        assert_eq!(
+            amounts("$5 and $10"),
+            vec![(Currency::Symbol('$'), 500), (Currency::Symbol('$'), 1000)]
+        );
+    }
+
+    #[test]
+    fn find_amounts_distinct_symbols_stay_distinct() {
+        assert_eq!(
+            amounts("$5 and \u{a3}5"),
+            vec![(Currency::Symbol('$'), 500), (Currency::Symbol('\u{a3}'), 500)]
+        );
+    }
+
+    #[test]
+    fn find_amounts_maps_symbol_to_code() {
+        let mut map = SymbolMap::new();
+        map.insert('$', "USD".to_string());
+        assert_eq!(
+            find_amounts("$5", &map),
+            vec![(Currency::Code("USD".to_string()), 500)]
+        );
+    }
+
+    #[test]
+    fn parse_map_spec_single_entry() {
+        let mut map = SymbolMap::new();
+        parse_map_spec("$=USD", &mut map).unwrap();
+        assert_eq!(map.get(&'$'), Some(&"USD".to_string()));
+    }
+
+    #[test]
+    fn parse_map_spec_multiple_entries() {
+        let mut map = SymbolMap::new();
+        parse_map_spec("$=USD,\u{a3}=GBP", &mut map).unwrap();
+        assert_eq!(map.get(&'$'), Some(&"USD".to_string()));
+        assert_eq!(map.get(&'\u{a3}'), Some(&"GBP".to_string()));
+    }
+
+    #[test]
+    fn parse_map_spec_missing_equals_is_an_error() {
+        let mut map = SymbolMap::new();
+        assert!(parse_map_spec("$USD", &mut map).is_err());
+    }
+
+    #[test]
+    fn parse_map_spec_multi_char_symbol_is_an_error() {
+        let mut map = SymbolMap::new();
+        assert!(parse_map_spec("$$=USD", &mut map).is_err());
+    }
+
+    #[test]
+    fn parse_map_spec_lowercase_code_is_an_error() {
+        let mut map = SymbolMap::new();
+        assert!(parse_map_spec("$=usd", &mut map).is_err());
+    }
+
+    #[test]
+    fn parse_map_spec_wrong_length_code_is_an_error() {
+        let mut map = SymbolMap::new();
+        assert!(parse_map_spec("$=US", &mut map).is_err());
+    }
+
+    #[test]
+    fn parse_args_defaults_with_no_flags() {
+        let (map, per_file, paths) = parse_args(vec!["a.txt".to_string()].into_iter()).unwrap();
+        assert!(map.is_empty());
+        assert!(!per_file);
+        assert_eq!(paths, vec!["a.txt".to_string()]);
+    }
+
+    #[test]
+    fn parse_args_map_flag_with_separate_argument() {
+        let args = vec!["--map".to_string(), "$=USD".to_string(), "a.txt".to_string()];
+        let (map, _, paths) = parse_args(args.into_iter()).unwrap();
+        assert_eq!(map.get(&'$'), Some(&"USD".to_string()));
+        assert_eq!(paths, vec!["a.txt".to_string()]);
+    }
+
+    #[test]
+    fn parse_args_map_flag_with_equals_form() {
+        let args = vec!["--map=$=USD".to_string()];
+        let (map, _, _) = parse_args(args.into_iter()).unwrap();
+        assert_eq!(map.get(&'$'), Some(&"USD".to_string()));
+    }
+
+    #[test]
+    fn parse_args_map_with_no_argument_is_an_error() {
+        let args = vec!["--map".to_string()];
+        assert!(parse_args(args.into_iter()).is_err());
+    }
+
+    #[test]
+    fn parse_args_per_file_flag() {
+        let args = vec!["--per-file".to_string(), "a.txt".to_string(), "b.txt".to_string()];
+        let (_, per_file, paths) = parse_args(args.into_iter()).unwrap();
+        assert!(per_file);
+        assert_eq!(paths, vec!["a.txt".to_string(), "b.txt".to_string()]);
+    }
+
+    #[test]
+    fn format_cents_basic() {
+        assert_eq!(format_cents(2949), "29.49");
+    }
+
+    #[test]
+    fn format_cents_negative() {
+        assert_eq!(format_cents(-300), "-3.00");
+    }
+
+    #[test]
+    fn format_cents_thousands_grouping() {
+        assert_eq!(format_cents(123456789), "1,234,567.89");
+    }
+
+    #[test]
+    fn format_cents_zero() {
+        assert_eq!(format_cents(0), "0.00");
+    }
+}

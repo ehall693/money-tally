@@ -20,7 +20,7 @@ enum Currency {
 }
 
 fn main() {
-    let (symbol_map, per_file, paths) = match parse_args(env::args().skip(1)) {
+    let args = match parse_args(env::args().skip(1)) {
         Ok(parsed) => parsed,
         Err(msg) => {
             eprintln!("money-tally: {msg}");
@@ -28,7 +28,7 @@ fn main() {
         }
     };
 
-    if per_file && paths.is_empty() {
+    if args.per_file && args.paths.is_empty() {
         eprintln!("money-tally: --per-file requires at least one file argument");
         std::process::exit(1);
     }
@@ -36,19 +36,19 @@ fn main() {
     let mut overall_totals: BTreeMap<Currency, i64> = BTreeMap::new();
     let mut overall_counts: BTreeMap<Currency, u64> = BTreeMap::new();
 
-    let result = if paths.is_empty() {
+    let result = if args.paths.is_empty() {
         let stdin = io::stdin();
         let mut handle = stdin.lock();
-        scan(&mut handle, &symbol_map, &mut overall_totals, &mut overall_counts)
-    } else if per_file {
+        scan(&mut handle, &args, &mut overall_totals, &mut overall_counts)
+    } else if args.per_file {
         let mut result = Ok(());
-        for path in &paths {
+        for path in &args.paths {
             let mut file_totals: BTreeMap<Currency, i64> = BTreeMap::new();
             let mut file_counts: BTreeMap<Currency, u64> = BTreeMap::new();
             match File::open(path) {
                 Ok(file) => {
                     let mut reader = BufReader::new(file);
-                    if let Err(e) = scan(&mut reader, &symbol_map, &mut file_totals, &mut file_counts) {
+                    if let Err(e) = scan(&mut reader, &args, &mut file_totals, &mut file_counts) {
                         result = Err(format!("reading {path}: {e}"));
                         break;
                     }
@@ -66,11 +66,11 @@ fn main() {
         result
     } else {
         let mut result = Ok(());
-        for path in &paths {
+        for path in &args.paths {
             match File::open(path) {
                 Ok(file) => {
                     let mut reader = BufReader::new(file);
-                    if let Err(e) = scan(&mut reader, &symbol_map, &mut overall_totals, &mut overall_counts) {
+                    if let Err(e) = scan(&mut reader, &args, &mut overall_totals, &mut overall_counts) {
                         result = Err(format!("reading {path}: {e}"));
                         break;
                     }
@@ -89,10 +89,10 @@ fn main() {
         std::process::exit(1);
     }
 
-    if per_file && paths.len() > 1 {
+    if args.per_file && args.paths.len() > 1 {
         println!("overall:");
     }
-    if !per_file || paths.len() > 1 {
+    if !args.per_file || args.paths.len() > 1 {
         print_totals(&overall_totals, &overall_counts);
     }
 }
@@ -131,15 +131,26 @@ fn merge_into(
     }
 }
 
-// Splits `--map SPEC` and `--per-file` (and the file-path arguments) out of
-// the raw args. SPEC is one or more "symbol=CODE" pairs separated by
-// commas, e.g. "$=USD,£=GBP"; the flag can also be repeated to build up
-// one map.
-fn parse_args<I: Iterator<Item = String>>(
-    args: I,
-) -> Result<(SymbolMap, bool, Vec<String>), String> {
+// Parsed command-line arguments, kept as one struct once there were enough
+// flags that a tuple got hard to read at the call site.
+struct Args {
+    map: SymbolMap,
+    per_file: bool,
+    min: Option<i64>,
+    max: Option<i64>,
+    paths: Vec<String>,
+}
+
+// Splits the recognized flags (and the file-path arguments) out of the raw
+// args. `--map SPEC` takes one or more "symbol=CODE" pairs separated by
+// commas, e.g. "$=USD,£=GBP"; the flag can also be repeated to build up one
+// map. `--min`/`--max` each take a plain decimal amount, e.g. "10" or
+// "10.50", and bound which amounts count toward the total.
+fn parse_args<I: Iterator<Item = String>>(args: I) -> Result<Args, String> {
     let mut map = SymbolMap::new();
     let mut per_file = false;
+    let mut min = None;
+    let mut max = None;
     let mut paths = Vec::new();
     let mut args = args;
 
@@ -153,12 +164,51 @@ fn parse_args<I: Iterator<Item = String>>(
             parse_map_spec(&spec, &mut map)?;
         } else if arg == "--per-file" {
             per_file = true;
+        } else if let Some(value) = arg.strip_prefix("--min=") {
+            min = Some(parse_decimal_arg("min", value)?);
+        } else if arg == "--min" {
+            let value = args
+                .next()
+                .ok_or_else(|| "--min requires an argument, e.g. --min 10".to_string())?;
+            min = Some(parse_decimal_arg("min", &value)?);
+        } else if let Some(value) = arg.strip_prefix("--max=") {
+            max = Some(parse_decimal_arg("max", value)?);
+        } else if arg == "--max" {
+            let value = args
+                .next()
+                .ok_or_else(|| "--max requires an argument, e.g. --max 100".to_string())?;
+            max = Some(parse_decimal_arg("max", &value)?);
         } else {
             paths.push(arg);
         }
     }
 
-    Ok((map, per_file, paths))
+    if let (Some(min), Some(max)) = (min, max) {
+        if min > max {
+            return Err(format!(
+                "--min ({}) is greater than --max ({})",
+                format_cents(min),
+                format_cents(max)
+            ));
+        }
+    }
+
+    Ok(Args { map, per_file, min, max, paths })
+}
+
+// Parses a whole `--min`/`--max` argument (optionally negative) into minor
+// units, rejecting anything left over -- "10x" isn't a number just because
+// it starts with one.
+fn parse_decimal_arg(flag: &str, s: &str) -> Result<i64, String> {
+    let chars: Vec<char> = s.chars().collect();
+    let negative = chars.first() == Some(&'-');
+    let start = if negative { 1 } else { 0 };
+    match parse_amount(&chars, start) {
+        Some((cents, end)) if end == chars.len() => Ok(if negative { -cents } else { cents }),
+        _ => Err(format!(
+            "invalid --{flag} value \"{s}\", expected a number like 10 or 10.50"
+        )),
+    }
 }
 
 fn parse_map_spec(spec: &str, map: &mut SymbolMap) -> Result<(), String> {
@@ -188,7 +238,7 @@ fn parse_map_spec(spec: &str, map: &mut SymbolMap) -> Result<(), String> {
 // bounded by the longest single line, not by the size of the input.
 fn scan<R: BufRead>(
     reader: &mut R,
-    symbol_map: &SymbolMap,
+    args: &Args,
     totals: &mut BTreeMap<Currency, i64>,
     counts: &mut BTreeMap<Currency, u64>,
 ) -> Result<(), String> {
@@ -199,7 +249,10 @@ fn scan<R: BufRead>(
         if bytes_read == 0 {
             break;
         }
-        for (currency, cents) in find_amounts(&line, symbol_map) {
+        for (currency, cents) in find_amounts(&line, &args.map) {
+            if args.min.is_some_and(|min| cents < min) || args.max.is_some_and(|max| cents > max) {
+                continue;
+            }
             *totals.entry(currency.clone()).or_insert(0) += cents;
             *counts.entry(currency).or_insert(0) += 1;
         }
@@ -560,39 +613,121 @@ mod tests {
 
     #[test]
     fn parse_args_defaults_with_no_flags() {
-        let (map, per_file, paths) = parse_args(vec!["a.txt".to_string()].into_iter()).unwrap();
-        assert!(map.is_empty());
-        assert!(!per_file);
-        assert_eq!(paths, vec!["a.txt".to_string()]);
+        let args = parse_args(vec!["a.txt".to_string()].into_iter()).unwrap();
+        assert!(args.map.is_empty());
+        assert!(!args.per_file);
+        assert_eq!(args.min, None);
+        assert_eq!(args.max, None);
+        assert_eq!(args.paths, vec!["a.txt".to_string()]);
     }
 
     #[test]
     fn parse_args_map_flag_with_separate_argument() {
-        let args = vec!["--map".to_string(), "$=USD".to_string(), "a.txt".to_string()];
-        let (map, _, paths) = parse_args(args.into_iter()).unwrap();
-        assert_eq!(map.get(&'$'), Some(&"USD".to_string()));
-        assert_eq!(paths, vec!["a.txt".to_string()]);
+        let raw = vec!["--map".to_string(), "$=USD".to_string(), "a.txt".to_string()];
+        let args = parse_args(raw.into_iter()).unwrap();
+        assert_eq!(args.map.get(&'$'), Some(&"USD".to_string()));
+        assert_eq!(args.paths, vec!["a.txt".to_string()]);
     }
 
     #[test]
     fn parse_args_map_flag_with_equals_form() {
-        let args = vec!["--map=$=USD".to_string()];
-        let (map, _, _) = parse_args(args.into_iter()).unwrap();
-        assert_eq!(map.get(&'$'), Some(&"USD".to_string()));
+        let raw = vec!["--map=$=USD".to_string()];
+        let args = parse_args(raw.into_iter()).unwrap();
+        assert_eq!(args.map.get(&'$'), Some(&"USD".to_string()));
     }
 
     #[test]
     fn parse_args_map_with_no_argument_is_an_error() {
-        let args = vec!["--map".to_string()];
-        assert!(parse_args(args.into_iter()).is_err());
+        let raw = vec!["--map".to_string()];
+        assert!(parse_args(raw.into_iter()).is_err());
     }
 
     #[test]
     fn parse_args_per_file_flag() {
-        let args = vec!["--per-file".to_string(), "a.txt".to_string(), "b.txt".to_string()];
-        let (_, per_file, paths) = parse_args(args.into_iter()).unwrap();
-        assert!(per_file);
-        assert_eq!(paths, vec!["a.txt".to_string(), "b.txt".to_string()]);
+        let raw = vec!["--per-file".to_string(), "a.txt".to_string(), "b.txt".to_string()];
+        let args = parse_args(raw.into_iter()).unwrap();
+        assert!(args.per_file);
+        assert_eq!(args.paths, vec!["a.txt".to_string(), "b.txt".to_string()]);
+    }
+
+    #[test]
+    fn parse_args_min_flag_with_separate_argument() {
+        let raw = vec!["--min".to_string(), "10.50".to_string(), "a.txt".to_string()];
+        let args = parse_args(raw.into_iter()).unwrap();
+        assert_eq!(args.min, Some(1050));
+        assert_eq!(args.paths, vec!["a.txt".to_string()]);
+    }
+
+    #[test]
+    fn parse_args_max_flag_with_equals_form() {
+        let raw = vec!["--max=100".to_string()];
+        let args = parse_args(raw.into_iter()).unwrap();
+        assert_eq!(args.max, Some(10000));
+    }
+
+    #[test]
+    fn parse_args_min_flag_accepts_negative_value() {
+        let raw = vec!["--min=-5.00".to_string()];
+        let args = parse_args(raw.into_iter()).unwrap();
+        assert_eq!(args.min, Some(-500));
+    }
+
+    #[test]
+    fn parse_args_min_with_no_argument_is_an_error() {
+        let raw = vec!["--min".to_string()];
+        assert!(parse_args(raw.into_iter()).is_err());
+    }
+
+    #[test]
+    fn parse_args_min_with_garbage_value_is_an_error() {
+        let raw = vec!["--min=abc".to_string()];
+        assert!(parse_args(raw.into_iter()).is_err());
+    }
+
+    #[test]
+    fn parse_args_min_with_trailing_garbage_is_an_error() {
+        let raw = vec!["--min=10x".to_string()];
+        assert!(parse_args(raw.into_iter()).is_err());
+    }
+
+    #[test]
+    fn parse_args_min_greater_than_max_is_an_error() {
+        let raw = vec!["--min=100".to_string(), "--max=10".to_string()];
+        assert!(parse_args(raw.into_iter()).is_err());
+    }
+
+    #[test]
+    fn scan_min_filters_out_smaller_amounts() {
+        let args = parse_args(vec!["--min=10".to_string()].into_iter()).unwrap();
+        let mut totals = BTreeMap::new();
+        let mut counts = BTreeMap::new();
+        let mut input = "$5 and $15".as_bytes();
+        scan(&mut input, &args, &mut totals, &mut counts).unwrap();
+        assert_eq!(totals.get(&Currency::Symbol('$')), Some(&1500));
+        assert_eq!(counts.get(&Currency::Symbol('$')), Some(&1));
+    }
+
+    #[test]
+    fn scan_max_filters_out_larger_amounts() {
+        let args = parse_args(vec!["--max=10".to_string()].into_iter()).unwrap();
+        let mut totals = BTreeMap::new();
+        let mut counts = BTreeMap::new();
+        let mut input = "$5 and $15".as_bytes();
+        scan(&mut input, &args, &mut totals, &mut counts).unwrap();
+        assert_eq!(totals.get(&Currency::Symbol('$')), Some(&500));
+        assert_eq!(counts.get(&Currency::Symbol('$')), Some(&1));
+    }
+
+    #[test]
+    fn scan_min_and_max_together_keep_only_the_range() {
+        let args =
+            parse_args(vec!["--min=10".to_string(), "--max=20".to_string()].into_iter()).unwrap();
+        let mut totals = BTreeMap::new();
+        let mut counts = BTreeMap::new();
+        let mut input = "$5 $15 $25".as_bytes();
+        scan(&mut input, &args, &mut totals, &mut counts).unwrap();
+        assert_eq!(totals.get(&Currency::Symbol('$')), Some(&1500));
+        assert_eq!(counts.get(&Currency::Symbol('$')), Some(&1));
     }
 
     #[test]

@@ -53,7 +53,7 @@ versus AUD, or that `$` and `USD` are the same currency.
 ## Usage
 
 ```
-money-tally [--map SYMBOL=CODE[,SYMBOL=CODE...]] [--per-file] [file ...]
+money-tally [--map SYMBOL=CODE[,SYMBOL=CODE...]] [--per-file] [--min N] [--max N] [file ...]
 ```
 
 With no arguments it reads from stdin. With one or more file arguments it
@@ -94,6 +94,21 @@ repeated, or given a comma-separated list, to map more than one symbol:
 ```
 money-tally --map '$=USD,£=GBP' receipts.txt
 ```
+
+`--min` and `--max` drop amounts outside a range before they ever reach the
+total or the count -- useful for ignoring line-item noise like $0.01
+rounding adjustments, or a stray $50,000 that's clearly a typo:
+
+```
+$ money-tally --min 1 --max 1000 receipts.txt
+$29.49 total across 4 amounts
+```
+
+Both take a plain decimal number, no currency symbol, and apply the same
+threshold to every currency in the input. A negative amount is compared
+as-is, so `--min 0` keeps refunds like `-$3.00` out of the total. Either
+flag can be given alone; giving both requires `--min` to not exceed
+`--max`.
 
 ## Current limitations
 
